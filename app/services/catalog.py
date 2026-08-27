@@ -1,12 +1,17 @@
-"""Каталог: категории, товары, остатки (ТЗ п.13-п.18)."""
+"""Каталог: категории, товары, остатки (ТЗ п.13-п.18).
+
+Чтение для бота идёт через Redis-кэш (namespace catalog), любая правка
+в админке делает cache.bump — бот видит изменения мгновенно.
+"""
 from __future__ import annotations
 
-from decimal import Decimal
+import re
+import unicodedata
+from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
 import structlog
-from slugify import slugify
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import NS_CATALOG, cache
@@ -19,6 +24,36 @@ from app.models import (
 )
 
 log = structlog.get_logger(__name__)
+
+# Транслитерация без внешних зависимостей — слаги должны быть читаемыми.
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh",
+    "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+    "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "c",
+    "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e",
+    "ю": "yu", "я": "ya",
+}
+
+
+def _slugify(value: str, max_length: int = 80) -> str:
+    text = (value or "").strip().lower()
+    text = "".join(_TRANSLIT.get(char, char) for char in text)
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    text = re.sub(r"-{2,}", "-", text)
+    return text[:max_length].strip("-")
+
+
+def make_slug(value: str, fallback: str = "item") -> str:
+    return _slugify(value) or fallback
+
+
+def _decimal(value: Any, default: str = "0") -> Decimal:
+    try:
+        return Decimal(str(value).replace(",", ".").strip())
+    except (InvalidOperation, AttributeError, TypeError, ValueError):
+        return Decimal(default)
 
 
 # =====================================================================
@@ -122,11 +157,6 @@ async def is_available(db: AsyncSession, product: Product) -> bool:
 # =====================================================================
 #  АДМИНКА: КАТЕГОРИИ
 # =====================================================================
-def make_slug(value: str, fallback: str = "item") -> str:
-    slug = slugify(value or "", max_length=80)
-    return slug or fallback
-
-
 async def list_categories(
     db: AsyncSession, *, query: str | None = None, include_inactive: bool = True
 ) -> Sequence[Category]:
@@ -148,7 +178,7 @@ async def save_category(
 
     title = data.get("title") or {}
     slug_source = data.get("slug") or title.get("ru") or title.get("en") or "category"
-    category.slug = make_slug(str(slug_source), fallback=f"category-{category_id or ''}".strip("-"))
+    category.slug = make_slug(str(slug_source), fallback=f"category-{category_id or 'new'}")
     category.title = title
     category.description = data.get("description") or {}
     category.emoji = (data.get("emoji") or "📂")[:16]
@@ -182,6 +212,25 @@ async def toggle_category(db: AsyncSession, category_id: int) -> Category | None
     return category
 
 
+async def move_category(db: AsyncSession, category_id: int, direction: str) -> None:
+    """Переставить категорию вверх/вниз в списке."""
+    rows = list(await list_categories(db))
+    index = next((i for i, row in enumerate(rows) if row.id == category_id), None)
+    if index is None:
+        return
+    target = index - 1 if direction == "up" else index + 1
+    if not 0 <= target < len(rows):
+        return
+    rows[index].sort_order, rows[target].sort_order = (
+        rows[target].sort_order,
+        rows[index].sort_order,
+    )
+    if rows[index].sort_order == rows[target].sort_order:
+        rows[target].sort_order += 1 if direction == "up" else -1
+    await db.commit()
+    await cache.bump(NS_CATALOG)
+
+
 # =====================================================================
 #  АДМИНКА: ТОВАРЫ
 # =====================================================================
@@ -203,12 +252,7 @@ async def list_products(
     if only_active:
         conditions.append(Product.is_active.is_(True))
     if query:
-        like = f"%{query.strip()}%"
-        conditions.append(
-            or_(Product.slug.ilike(like), func.cast(Product.title, func.text().type).ilike(like))
-            if False
-            else Product.slug.ilike(like)
-        )
+        conditions.append(Product.slug.ilike(f"%{query.strip()}%"))
 
     for condition in conditions:
         stmt = stmt.where(condition)
@@ -230,14 +274,14 @@ async def save_product(
 
     title = data.get("title") or {}
     slug_source = data.get("slug") or title.get("ru") or title.get("en") or "product"
-    product.slug = make_slug(str(slug_source), fallback=f"product-{product_id or ''}".strip("-"))
+    product.slug = make_slug(str(slug_source), fallback=f"product-{product_id or 'new'}")
     product.category_id = int(data["category_id"]) if data.get("category_id") else None
     product.title = title
     product.description = data.get("description") or {}
     product.emoji = (data.get("emoji") or "🛍")[:16]
-    product.price = Decimal(str(data.get("price") or "0"))
+    product.price = _decimal(data.get("price"))
     product.old_price = (
-        Decimal(str(data["old_price"])) if data.get("old_price") not in (None, "") else None
+        _decimal(data["old_price"]) if data.get("old_price") not in (None, "") else None
     )
     product.currency = (data.get("currency") or "RUB")[:8]
     product.image_url = data.get("image_url") or None
@@ -281,6 +325,19 @@ async def category_choices(db: AsyncSession) -> list[dict[str, Any]]:
             "id": row.id,
             "title": (row.title or {}).get("ru") or (row.title or {}).get("en") or row.slug,
             "emoji": row.emoji,
+        }
+        for row in rows
+    ]
+
+
+async def product_choices(db: AsyncSession) -> list[dict[str, Any]]:
+    rows, _ = await list_products(db, limit=500)
+    return [
+        {
+            "id": row.id,
+            "title": (row.title or {}).get("ru") or (row.title or {}).get("en") or row.slug,
+            "emoji": row.emoji,
+            "price": str(row.price),
         }
         for row in rows
     ]
