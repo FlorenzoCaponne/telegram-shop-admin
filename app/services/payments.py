@@ -64,9 +64,10 @@ class SyncResult:
 
 
 async def _base_url(db: AsyncSession) -> str:
+    """Публичный адрес для return/failed ссылок: сначала админка, потом .env."""
     domain = str(await cms.setting(db, "shop.domain", "") or "").strip().rstrip("/")
     if domain:
-        return domain if domain.startswith("http") else f"https://{domain}"
+        return domain if domain.startswith("http") else "https://" + domain
     try:
         from app.core.config import settings
 
@@ -105,9 +106,10 @@ async def start_payment(
         return PaymentStart(ok=False, error="method_not_allowed")
 
     base_url = await _base_url(db)
-    user = order.user if "user" in order.__dict__ else None
+    user = order.__dict__.get("user")
     tg_id = getattr(user, "tg_id", None)
     user_name = getattr(user, "username", None) or getattr(user, "first_name", None)
+    info = pay_base.METHODS.get(int(method_code))
 
     request = pay_base.CreatePaymentRequest(
         order_no=order.public_no,
@@ -127,9 +129,7 @@ async def start_payment(
         order_id=order.id,
         provider=getattr(provider, "name", "platega"),
         method_code=int(method_code),
-        method_name=pay_base.METHODS.get(int(method_code), None).name
-        if int(method_code) in pay_base.METHODS
-        else None,
+        method_name=info.name if info else None,
         amount=Decimal(order.total),
         currency=order.currency or "RUB",
         status=PaymentStatus.PENDING,
@@ -149,8 +149,9 @@ async def start_payment(
     payment.redirect_url = result.redirect_url
     payment.expires_at = result.expires_at
     payment.raw_response = result.raw or {}
-    mapped = STATUS_MAP.get(pay_base.normalize_status(result.status), PaymentStatus.PENDING)
-    payment.status = mapped
+    payment.status = STATUS_MAP.get(
+        pay_base.normalize_status(result.status), PaymentStatus.PENDING
+    )
 
     db.add(payment)
     try:
@@ -454,15 +455,17 @@ async def payments_summary(db: AsyncSession, days: int = 30) -> dict[str, Any]:
         .where(Payment.created_at >= since, Payment.status == PaymentStatus.CONFIRMED)
         .group_by(Payment.method_code)
     )
-    methods = [
-        {
-            "code": int(code) if code is not None else None,
-            "name": pay_base.METHODS[int(code)].name if code in pay_base.METHODS else "—",
-            "count": int(count),
-            "amount": Decimal(amount or 0),
-        }
-        for code, count, amount in (await db.execute(method_stmt)).all()
-    ]
+    methods = []
+    for code, count, amount in (await db.execute(method_stmt)).all():
+        info = pay_base.METHODS.get(int(code)) if code is not None else None
+        methods.append(
+            {
+                "code": int(code) if code is not None else None,
+                "name": info.name if info else "—",
+                "count": int(count),
+                "amount": Decimal(amount or 0),
+            }
+        )
 
     return {
         "days": days,
