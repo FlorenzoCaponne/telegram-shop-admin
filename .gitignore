@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+.env.production
+backups/
+media/
+deploy/certbot/
+*.sqlite3
+*.db
+*.log
+.DS_Store
+.idea/
+.vscode/
