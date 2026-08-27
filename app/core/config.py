@@ -60,8 +60,14 @@ class Settings(BaseSettings):
     platega_webhook_secret: str = ""
     platega_test_mode: bool = True
     platega_send_metadata: bool = True
+    platega_webhook_require_signature: bool = False
+    payment_methods: str = "2,13"
     payment_ttl_seconds: int = 900
     payment_poll_interval: int = 5
+
+    # ---------- BOT LIMITS ----------
+    rate_limit_per_second: int = 3
+    broadcast_rate: int = 20
 
     # ---------- derived ----------
     @field_validator("supported_locales")
@@ -83,8 +89,22 @@ class Settings(BaseSettings):
         return out
 
     @property
+    def payment_method_list(self) -> list[int]:
+        out: list[int] = []
+        for chunk in str(self.payment_methods).replace(";", ",").split(","):
+            chunk = chunk.strip()
+            if chunk.isdigit():
+                out.append(int(chunk))
+        return out or [2, 13]
+
+    @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @property
+    def public_base_url(self) -> str:
+        """Алиас для внешних ссылок (return/failed/webhook)."""
+        return self.base_url.rstrip("/")
 
     @property
     def telegram_webhook_url(self) -> str:
