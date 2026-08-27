@@ -5,8 +5,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from decimal import Decimal
+from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot import callbacks as cb
 from app.models import Category, Order, Product
 from app.services import cms
+
+MAX_BUTTONS_IN_ROW = 8
 
 
 @dataclass(slots=True)
@@ -45,7 +46,8 @@ def _label(item: Any, locale: str) -> str:
     return f"{emoji} {text}".strip() if emoji else text
 
 
-def _row_key(item: Any, fallback: int) -> tuple[int, int]:
+def _sort_key(item: Any, fallback: int) -> tuple[int, int]:
+    """(номер ряда, позиция в ряду) из настроек кнопки."""
     try:
         row = int(_get(item, "row", fallback) or 0)
     except (TypeError, ValueError):
@@ -60,16 +62,17 @@ def _row_key(item: Any, fallback: int) -> tuple[int, int]:
 def _chunk(
     buttons: Sequence[InlineKeyboardButton], per_row: int
 ) -> list[list[InlineKeyboardButton]]:
-    per_row = max(1, int(per_row or 1))
+    per_row = max(1, min(int(per_row or 1), MAX_BUTTONS_IN_ROW))
     return [list(buttons[i : i + per_row]) for i in range(0, len(buttons), per_row)]
 
 
 # =====================================================================
 #  КНОПКИ ИЗ CMS
 # =====================================================================
-async def _resolve_action(
-    db: AsyncSession, item: Any, locale: str, context: dict[str, Any]
+def _resolve_action(
+    item: Any, locale: str, context: dict[str, Any]
 ) -> InlineKeyboardButton | None:
+    """Превратить настройку кнопки из админки в кнопку Telegram."""
     action = str(_get(item, "action") or "noop")
     payload = _get(item, "payload") or ""
     url = str(_get(item, "url") or "").strip()
@@ -83,9 +86,7 @@ async def _resolve_action(
         return InlineKeyboardButton(text=text, callback_data=cb.catalog())
     if action == "category":
         try:
-            return InlineKeyboardButton(
-                text=text, callback_data=cb.category(int(payload))
-            )
+            return InlineKeyboardButton(text=text, callback_data=cb.category(int(payload)))
         except (TypeError, ValueError):
             return InlineKeyboardButton(text=text, callback_data=cb.catalog())
     if action == "product":
@@ -123,31 +124,37 @@ async def cms_buttons(
     locale: str,
     context: dict[str, Any] | None = None,
 ) -> list[list[InlineKeyboardButton]]:
-    """Кнопки экрана, настроенные в админке (с учётом row/position/is_wide)."""
+    """Кнопки экрана из админки: группируются по полю row, широкие — отдельно."""
     context = context or {}
     items = await cms.get_buttons(db, screen)
-    prepared: list[tuple[tuple[int, int], bool, InlineKeyboardButton]] = []
+
+    prepared: list[tuple[int, int, bool, InlineKeyboardButton]] = []
     for index, item in enumerate(items or []):
         if not bool(_get(item, "is_active", True)):
             continue
-        button = await _resolve_action(db, item, locale, context)
+        button = _resolve_action(item, locale, context)
         if button is None:
             continue
-        prepared.append((_row_key(item, index), bool(_get(item, "is_wide", False)), button))
+        row, position = _sort_key(item, index)
+        prepared.append((row, position, bool(_get(item, "is_wide", False)), button))
 
-    prepared.sort(key=lambda triple: triple[0])
+    prepared.sort(key=lambda entry: (entry[0], entry[1]))
+
     rows: list[list[InlineKeyboardButton]] = []
-    for (row_index, _), is_wide, button in prepared:
-        if is_wide or not rows or rows[-1] and row_index != _row_key_of(rows, row_index):
+    current_row_index: int | None = None
+    for row_index, _position, is_wide, button in prepared:
+        start_new_row = (
+            is_wide
+            or not rows
+            or row_index != current_row_index
+            or len(rows[-1]) >= MAX_BUTTONS_IN_ROW
+        )
+        if start_new_row:
             rows.append([button])
+            current_row_index = None if is_wide else row_index
         else:
             rows[-1].append(button)
     return rows
-
-
-def _row_key_of(rows: list[list[InlineKeyboardButton]], row_index: int) -> int:
-    """Вспомогательная функция группировки: текущий индекс ряда."""
-    return row_index
 
 
 def markup(rows: Iterable[Iterable[InlineKeyboardButton]]) -> InlineKeyboardMarkup | None:
@@ -240,7 +247,7 @@ async def main_screen(db: AsyncSession, locale: str, *, user: Any = None) -> Scr
 
     rows = await cms_buttons(db, "main", locale)
     image = block_image or await cms.image(db, "main")
-    return Screen(text=text or title, markup=markup(rows), image_url=image)
+    return Screen(text=text, markup=markup(rows), image_url=image)
 
 
 async def catalog_screen(
@@ -255,7 +262,7 @@ async def catalog_screen(
     per_row = int(await cms.design_value(db, "catalog.buttons_per_row", 2) or 2)
     buttons = [
         InlineKeyboardButton(
-            text=_label(item, locale) or "—", callback_data=cb.category(item.id)
+            text=(_label(item, locale) or "—")[:64], callback_data=cb.category(item.id)
         )
         for item in categories
     ]
@@ -280,13 +287,13 @@ async def category_screen(
     title = cms.pick_locale(category.title, locale)
     description = cms.pick_locale(category.description, locale) or ""
     header = await cms.t(db, "category.title", locale, title=title)
-    text = "\n\n".join(x for x in (header or f"<b>{title}</b>", description) if x)
+    if not header or header.startswith("["):
+        header = f"<b>{title}</b>"
+    text = "\n\n".join(x for x in (header, description) if x)
     if not products:
         text = f"{text}\n\n{await cms.t(db, 'category.empty', locale)}"
 
-    show_price = bool(
-        await cms.design_value(db, "show_product_price_in_button", True)
-    )
+    show_price = bool(await cms.design_value(db, "show_product_price_in_button", True))
     per_row = int(
         category.buttons_per_row
         or await cms.design_value(db, "category.buttons_per_row", 1)
@@ -385,6 +392,8 @@ async def methods_screen(
     text = await cms.t(
         db, "purchase.methods", locale, total=total, order_no=order.public_no
     )
+    if not text or text.startswith("["):
+        text = f"<b>{total}</b>\n<code>{order.public_no}</code>"
     rows = [
         [
             InlineKeyboardButton(
@@ -395,18 +404,17 @@ async def methods_screen(
         for item in methods
     ]
     rows.append(await back_row(db, locale, target=cb.product(order.product_id or 0)))
-    return Screen(
-        text=text, markup=markup(rows), image_url=await cms.image(db, "payment")
-    )
+    return Screen(text=text, markup=markup(rows), image_url=await cms.image(db, "payment"))
 
 
 async def payment_screen(
     db: AsyncSession, locale: str, order: Order, *, redirect_url: str | None
 ) -> Screen:
     total = await cms.format_price(db, order.total, order.currency or "")
-    text = await cms.t(
-        db, "purchase.link", locale, total=total, order_no=order.public_no
-    )
+    text = await cms.t(db, "purchase.link", locale, total=total, order_no=order.public_no)
+    if not text or text.startswith("["):
+        text = f"Счёт <code>{order.public_no}</code> на {total} создан."
+
     rows: list[list[InlineKeyboardButton]] = []
     if redirect_url:
         pay_emoji = await cms.e(db, "buy")
@@ -425,18 +433,12 @@ async def payment_screen(
         ]
     )
     cancel_label = "Отменить" if locale == "ru" else "Cancel"
-    rows.append(
-        [InlineKeyboardButton(text=cancel_label, callback_data=cb.cancel(order.id))]
-    )
+    rows.append([InlineKeyboardButton(text=cancel_label, callback_data=cb.cancel(order.id))])
     rows.append(await back_row(db, locale, target=cb.main_menu(), with_main=False))
-    return Screen(
-        text=text, markup=markup(rows), image_url=await cms.image(db, "payment")
-    )
+    return Screen(text=text, markup=markup(rows), image_url=await cms.image(db, "payment"))
 
 
-async def orders_screen(
-    db: AsyncSession, locale: str, orders: Sequence[Order]
-) -> Screen:
+async def orders_screen(db: AsyncSession, locale: str, orders: Sequence[Order]) -> Screen:
     text, block_image = await render_blocks(db, "orders", locale)
     header = text or await cms.t(db, "orders.title", locale)
     if not orders:
@@ -450,7 +452,8 @@ async def orders_screen(
     lines: list[str] = []
     rows: list[list[InlineKeyboardButton]] = []
     for order in orders:
-        status_emoji = await cms.e(db, f"status_{_get(order, 'status')}")
+        status = str(_get(order, "status"))
+        status_emoji = await cms.e(db, f"status_{status}")
         total = await cms.format_price(db, order.total, order.currency or "")
         line = await cms.t(
             db,
@@ -459,10 +462,12 @@ async def orders_screen(
             order_no=order.public_no,
             title=order.product_title or "",
             total=total,
-            status=str(_get(order, "status")),
+            status=status,
             emoji=status_emoji,
         )
-        lines.append(line if not line.startswith("[") else f"{status_emoji} {order.public_no} — {order.product_title} — {total}")
+        if not line or line.startswith("["):
+            line = f"{status_emoji} <code>{order.public_no}</code> — {order.product_title} — {total}"
+        lines.append(line)
         rows.append(
             [
                 InlineKeyboardButton(
@@ -491,10 +496,12 @@ async def order_screen(db: AsyncSession, locale: str, order: Order) -> Screen:
         f"<b>{total}</b>",
     ]
     if order.delivered_content:
-        delivered = await cms.t(db, "purchase.delivered", locale, content=order.delivered_content)
+        delivered = await cms.t(
+            db, "purchase.delivered", locale, content=order.delivered_content
+        )
         lines.append(
             delivered
-            if not delivered.startswith("[")
+            if delivered and not delivered.startswith("[")
             else f"<pre>{order.delivered_content}</pre>"
         )
 
