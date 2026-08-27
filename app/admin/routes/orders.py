@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
+from sqlalchemy import select
 
 from app.admin import deps
 from app.admin.templating import flash, render
 from app.core.security import Perm
-from app.models import OrderStatus
+from app.models import OrderStatus, Payment, User
 from app.services import audit, orders as orders_service, payments as payments_service
 
 router = APIRouter(tags=["admin-orders"])
@@ -50,11 +51,24 @@ async def order_detail(
     if order is None:
         flash(request, "Заказ не найден", "err")
         return deps.redirect(deps.admin_url("orders"))
-    payments, _ = await payments_service.list_payments(db, order_id=order.id, limit=50)
+
+    payments = (
+        (
+            await db.execute(
+                select(Payment)
+                .where(Payment.order_id == order.id)
+                .order_by(Payment.id.desc())
+            )
+        )
+        .scalars()
+        .unique()
+        .all()
+    )
+    buyer = await db.get(User, order.user_id) if order.user_id else None
     return await render(
         request,
         "orders/detail.html",
-        {"order": order, "payments": payments, "user": order.user},
+        {"order": order, "payments": payments, "buyer": buyer},
         db=db,
     )
 
@@ -110,12 +124,18 @@ async def order_sync(order_id: int, request: Request, db: deps.Db, admin=OrdersA
 
     result = await payments_service.sync_order_payment(db, order)
     if result.error:
-        flash(request, f"Ошибка провайдера: {result.error}", "err")
+        flash(request, f"Ответ провайдера: {result.error}", "err")
     else:
-        flash(request, f"Статус платежа: {result.status or '—'}")
+        flash(request, f"Статус платежа: {result.status}")
     if result.just_paid:
-        await orders_service.deliver(db, order)
-        flash(request, "Оплата подтверждена, выполнена выдача")
+        delivery = await orders_service.deliver(db, order)
+        flash(
+            request,
+            "Оплата подтверждена, товар выдан"
+            if delivery.ok
+            else f"Оплата подтверждена, выдача требует внимания: {delivery.reason}",
+            "ok" if delivery.ok else "err",
+        )
     return deps.redirect(deps.admin_url("orders", str(order_id)))
 
 
