@@ -1,0 +1,31 @@
+# Вариант без Docker: systemd + venv.
+# Копировать в /etc/systemd/system/tgshop.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now tgshop
+
+[Unit]
+Description=Telegram Shop (FastAPI + aiogram)
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tgshop
+Group=tgshop
+WorkingDirectory=/opt/tgshop
+EnvironmentFile=/opt/tgshop/.env
+ExecStartPre=/opt/tgshop/.venv/bin/alembic upgrade head
+ExecStart=/opt/tgshop/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips '*' --no-access-log
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+# Безопасность
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/tgshop/media
+
+[Install]
+WantedBy=multi-user.target
