@@ -1,0 +1,158 @@
+:root {
+	--surface: #0f172a;
+	--surface-2: #16203a;
+	--border: #1e293b;
+	--accent: #2563eb;
+}
+
+body {
+	-webkit-font-smoothing: antialiased;
+}
+
+/* Таблицы: горизонтальный скролл на телефоне */
+.table-wrap {
+	overflow-x: auto;
+}
+
+.table-wrap table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.875rem;
+}
+
+.table-wrap th {
+	text-align: left;
+	font-weight: 600;
+	color: #94a3b8;
+	padding: 0.625rem 0.75rem;
+	border-bottom: 1px solid var(--border);
+	white-space: nowrap;
+}
+
+.table-wrap td {
+	padding: 0.625rem 0.75rem;
+	border-bottom: 1px solid rgba(30, 41, 59, 0.6);
+	color: #e2e8f0;
+	vertical-align: middle;
+}
+
+.table-wrap tr:hover td {
+	background: rgba(37, 99, 235, 0.07);
+}
+
+/* Бейджи статусов */
+.badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.25rem;
+	padding: 0.125rem 0.5rem;
+	border-radius: 9999px;
+	font-size: 0.75rem;
+	font-weight: 600;
+	background: rgba(148, 163, 184, 0.15);
+	color: #cbd5e1;
+	white-space: nowrap;
+}
+
+.badge-ok {
+	background: rgba(34, 197, 94, 0.15);
+	color: #86efac;
+}
+
+.badge-wait {
+	background: rgba(234, 179, 8, 0.15);
+	color: #fde047;
+}
+
+.badge-err {
+	background: rgba(239, 68, 68, 0.15);
+	color: #fca5a5;
+}
+
+/* Карточки */
+.card {
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: 1rem;
+	padding: 1rem 1.25rem;
+}
+
+/* Формы */
+input,
+select,
+textarea {
+	font-family: inherit;
+}
+
+input[type="text"],
+input[type="number"],
+input[type="password"],
+input[type="email"],
+input[type="url"],
+input[type="datetime-local"],
+select,
+textarea {
+	width: 100%;
+}
+
+label {
+	font-size: 0.8125rem;
+	color: #94a3b8;
+}
+
+/* HTMX-индикатор загрузки */
+.htmx-indicator {
+	opacity: 0;
+	transition: opacity 150ms ease-in;
+}
+
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+	opacity: 1;
+}
+
+/* Сайдбар */
+.nav-link {
+	display: block;
+	padding: 0.4rem 0.75rem;
+	border-radius: 0.6rem;
+	color: #cbd5e1;
+	font-size: 0.875rem;
+	text-decoration: none;
+}
+
+.nav-link:hover {
+	background: rgba(148, 163, 184, 0.12);
+	color: #fff;
+}
+
+.nav-link.active {
+	background: var(--accent);
+	color: #fff;
+	font-weight: 600;
+}
+
+.nav-group {
+	font-size: 0.6875rem;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: #64748b;
+	padding: 0.75rem 0.75rem 0.25rem;
+}
+
+/* Превью сообщения бота */
+.tg-preview {
+	background: #17212b;
+	border-radius: 0.9rem;
+	padding: 0.75rem 0.9rem;
+	color: #fff;
+	font-size: 0.9rem;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+@media (max-width: 768px) {
+	.card {
+		padding: 0.875rem;
+	}
+}
